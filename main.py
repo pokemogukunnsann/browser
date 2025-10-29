@@ -163,7 +163,7 @@ def browser_access(full_url_path):
                 locale='ja-JP',
                 timezone_id=browser_info.get('Timezone-Id', 'Asia/Tokyo')
             )
-            print(f"Context options:{context.options}")
+            #print(f"Context options:{context.options}")
 
             page = context.new_page()
 
