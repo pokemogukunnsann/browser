@@ -188,8 +188,12 @@ def browser_access(full_url_path):
         print(f"🚨 {error_msg}")
         return render_template_string(INDEX_HTML_WITH_JS, error_message=error_msg)
 
-    # 成功したらトップページにリダイレクトして結果を表示
-    return redirect(url_for('index'))
+    # 成功したら結果を表示
+    return render_template_string(
+        INDEX_HTML_WITH_JS,
+        html_content=global_html_content,
+        target_url=target_url
+    )
 
 # --- アプリケーション実行 ---
 
