@@ -63,14 +63,18 @@ print(f"INDEX_HTML_WITH_JS (partial): {INDEX_HTML_WITH_JS[:100]}...")
 
 @app.route('/', methods=['GET'])
 def index():
+    print("index.htmlを表示中")
     """初期画面: URL入力フォームを表示"""
     return render_template_string(INDEX_HTML_WITH_JS)
 
 @app.route('/submit_url', methods=['POST'])
 def submit_url():
+    print("データを受け取りました。このデータを使ってリダイレクトします。")
     """フォームから受け取ったデータとJS情報を処理し、新しいURLにリダイレクト"""
     base_url = request.form.get('base_url', '')
     path_input = request.form.get('path_input', '').strip('/')
+    print(f"base_url:{base_url}")
+    print(f"path_input:{path_input}")
     
     # JavaScriptから送られた情報を取得
     screen_info = request.form.get('screen_info')
@@ -109,9 +113,9 @@ def browse(full_url, path_suffix):
     # ターゲットURLの作成
     target_url_base = full_url
     if path_suffix:
-        target_url = f"http://{target_url_base.strip('/')}/{path_suffix}"
+        target_url = f"https://{target_url_base.strip('/')}/{path_suffix}"
     else:
-        target_url = f"http://{target_url_base.strip('/')}"
+        target_url = f"https://{target_url_base.strip('/')}"
         
     if not (target_url.startswith('http://') or target_url.startswith('https://')):
         # 多くのサイトはHTTPSなので、デフォルトでHTTPSを試みる
@@ -121,6 +125,7 @@ def browse(full_url, path_suffix):
 
     # セッションからブラウザ情報を取得
     browser_info = session.pop('browser_info', {}) 
+    print(f" 🔐　悪用現金　🈲　browser_info:{browser_info}")
     
     # --- Playwrightの起動と処理 ---
     try:
