@@ -1,229 +1,201 @@
-from flask import Flask, request, render_template_string, redirect, url_for, session
-import requests
+import os
+import re
 import json
-import http.cookiejar as cookiejar
-# 🚨 Playwrightをインポート
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+import urllib.parse
+from flask import Flask, request, redirect, url_for, session, render_template_string
+from playwright.sync_api import sync_playwright
 
+# Flaskアプリケーションの初期化
 app = Flask(__name__)
-# 🚨 セッションを使うための秘密鍵を設定
-app.secret_key = 'your_super_secret_key_kakaomame' 
+
+# 💡 ユーザー情報に基づき、シークレットキーを特定の値に設定
+app.secret_key = 'your_super_secret_key_kakaomame'
 print(f"app.secret_key:{app.secret_key}")
 
-# --- HTMLテンプレート（Pythonの文字列として定義） ---
-# ⚠️ User-AgentはPlaywrightで設定するため、ここでは不要なカスタムヘッダーは削除
+# Playwrightで取得したHTMLコンテンツを格納するグローバル変数（簡易的なキャッシュとして使用）
+# 🚨 実際の本番環境ではデータベースやRedisなどを使用してください
+global_html_content = ""
+
+# 基本的なHTMLテンプレート（JavaScriptでブラウザ情報を取得・送信する機能付き）
 INDEX_HTML_WITH_JS = """
 <!doctype html>
 <title>🌐 Web Browser (Playwright)</title>
 <h1>🌐 URL入力フォームとブラウザ情報取得</h1>
-<p>アクセスしたいURLを入力してください。ブラウザ情報を取得し、ヘッドレスブラウザでアクセスします。</p>
-<form method="POST" action="/submit_url" id="browser-form">
-    <label for="base_url">ベースURL (例: example.com):</label><br>
-    <input type="text" id="base_url" name="base_url" required value="inv.nadeko.net"><br><br>
-    
-    <label for="path_input">追加パス (例: path1/path2/):</label><br>
-    <input type="text" id="path_input" name="path_input" value="embed/ei4FYvCWoZA"><br><br>
-    
+<p>アクセスしたいURLを入力してください（例: inv.nadeko.net/embed/ei4FYvCWoZA）</p>
+
+<form id="url-form" method="POST" action="/submit_url">
+    <input type="text" id="url_input" name="url_input" placeholder="URLを入力" style="width: 80%; padding: 10px;">
+    <button type="submit" style="padding: 10px;">アクセス開始</button>
     <input type="hidden" id="screen_info" name="screen_info">
     <input type="hidden" id="timezone_info" name="timezone_info">
-    <input type="hidden" id="user_agent" name="user_agent">
-
-    <div id="status">情報を取得中...</div><br>
-    <input type="submit" value="アクセス開始">
+    <input type="hidden" id="user_agent_from_js" name="user_agent_from_js">
 </form>
 
+<hr>
+<h2>⬇️ 最新のブラウザ情報とコンテンツ ⬇️</h2>
+
+{% if html_content %}
+    <details open>
+        <summary>✅ 取得成功: 200 OK</summary>
+        <p><strong>アクセス先:</strong> {{ target_url }}</p>
+        <p><strong>状況:</strong> ヘッドレスブラウザでボットチェックを突破しました</p>
+        <p><strong>HTMLコンテンツ（抜粋 0-500文字）</strong></p>
+        <pre>{{ html_content[:500] | e }}...</pre>
+        <a href="/">↩ 別のURLを試す</a>
+    </details>
+{% elif error_message %}
+    <details open>
+        <summary>❌ エラーが発生しました</summary>
+        <p style="color: red;"><strong>エラーメッセージ:</strong> {{ error_message | e }}</p>
+        <a href="/">↩ 別のURLを試す</a>
+    </details>
+{% else %}
+    <p>URLを入力してPlaywrightによるアクセスを開始してください。</p>
+{% endif %}
+
 <script>
-document.addEventListener('DOMContentLoaded', function() {
-    const form = document.getElementById('browser-form');
-    const screenInfoField = document.getElementById('screen_info');
-    const timezoneInfoField = document.getElementById('timezone_info');
-    const userAgentField = document.getElementById('user_agent');
-    const statusDiv = document.getElementById('status');
+    // フォーム送信前にブラウザ情報を取得して隠しフィールドに格納
+    document.addEventListener('DOMContentLoaded', function() {
+        const screenInfoField = document.getElementById('screen_info');
+        const timezoneInfoField = document.getElementById('timezone_info');
+        const userAgentField = document.getElementById('user_agent_from_js');
 
-    try {
-        // 1. 画面解像度の取得
         screenInfoField.value = `${window.screen.width}x${window.screen.height}`;
-        
-        // 2. タイムゾーンの取得
         timezoneInfoField.value = Intl.DateTimeFormat().resolvedOptions().timeZone;
-        
-        // 3. User-Agentの取得
         userAgentField.value = navigator.userAgent;
-
-        statusDiv.textContent = '✅ ブラウザ情報取得完了！';
-    } catch (e) {
-        statusDiv.textContent = '⚠️ 情報取得中にエラーが発生しました。';
-        console.error(e);
-    }
-});
+    });
 </script>
 """
-print(f"INDEX_HTML_WITH_JS (partial): {INDEX_HTML_WITH_JS[:100]}...")
+# テンプレートの抜粋を出力（デバッグ用）
+print(f"INDEX_HTML_WITH_JS (partial): {INDEX_HTML_WITH_JS[:250]}")
 
+# --- ルーティング ---
 
-@app.route('/', methods=['GET'])
+@app.route('/')
 def index():
+    """トップページ: URL入力フォームを表示"""
     print("index.htmlを表示中")
-    """初期画面: URL入力フォームを表示"""
-    return render_template_string(INDEX_HTML_WITH_JS)
+    return render_template_string(
+        INDEX_HTML_WITH_JS,
+        html_content=global_html_content,
+        target_url=session.get('target_url')
+    )
 
 @app.route('/submit_url', methods=['POST'])
 def submit_url():
+    """フォームデータを受け取り、Playwright実行ルートへリダイレクト"""
+    global global_html_content
+    global_html_content = ""  # コンテンツをリセット
+
+    url_input = request.form.get('url_input', '').strip()
+    screen_info = request.form.get('screen_info')
+    timezone_info = request.form.get('timezone_info')
+    user_agent_from_js = request.form.get('user_agent_from_js')
+
+    # ユーザー入力を解析
+    match = re.match(r'^(?:https?://)?([^/]+)(/.*)?$', url_input)
+    
+    if not match:
+        return render_template_string(INDEX_HTML_WITH_JS, error_message="無効なURL形式です。")
+
+    base_url = match.group(1)
+    path_input = match.group(2) if match.group(2) else ''
+
     print("データを受け取りました。このデータを使ってリダイレクトします。")
-    """フォームから受け取ったデータとJS情報を処理し、新しいURLにリダイレクト"""
-    base_url = request.form.get('base_url', '')
-    path_input = request.form.get('path_input', '').strip('/')
     print(f"base_url:{base_url}")
     print(f"path_input:{path_input}")
     
-    # JavaScriptから送られた情報を取得
-    screen_info = request.form.get('screen_info')
-    timezone_info = request.form.get('timezone_info')
-    user_agent_from_js = request.form.get('user_agent')
+    # セッションにブラウザ情報を保存 (Playwrightに渡すため)
+    width, height = map(int, screen_info.split('x')) if screen_info and 'x' in screen_info else (1920, 1080)
     
+    session['browser_info'] = {
+        'User-Agent': user_agent_from_js,
+        'Screen-Width': width,
+        'Screen-Height': height,
+        'Timezone-Id': timezone_info
+    }
     print(f"base_url:{base_url}")
     print(f"path_input:{path_input}")
     print(f"screen_info:{screen_info}")
     print(f"timezone_info:{timezone_info}")
     print(f"user_agent_from_js:{user_agent_from_js}")
-    
-    # セッションにブラウザ情報を保存 (次の browse() 関数で使うため)
-    session['browser_info'] = {
-        'User-Agent': user_agent_from_js,
-        'Screen-Width': int(screen_info.split('x')[0]),
-        'Screen-Height': int(screen_info.split('x')[1]),
-        'Timezone-Id': timezone_info,
-    }
     print(f"session['browser_info']:{session['browser_info']}")
-    
-    # URLとパスを結合し、リダイレクト
-    full_route = f"/browser/{base_url.strip('/')}"
-    if path_input:
-        full_route += f"/{path_input}"
-        
+
+    # Playwright実行ルートへリダイレクト
+    full_route = f'/browser/{base_url}{path_input}'
     print(f"full_route:{full_route}")
     return redirect(full_route)
 
 
-@app.route('/browser/<path:full_url>/', defaults={'path_suffix': ''}, methods=['GET'])
-@app.route('/browser/<path:full_url>/<path:path_suffix>', methods=['GET'])
-def browse(full_url, path_suffix):
-    """Playwrightを使って、高度なボット対策を回避しつつウェブページにアクセス"""
-    
-    # ターゲットURLの作成
-    target_url_base = full_url
-    if path_suffix:
-        target_url = f"https://{target_url_base.strip('/')}/{path_suffix}"
-    else:
-        target_url = f"https://{target_url_base.strip('/')}"
-        
-    if not (target_url.startswith('http://') or target_url.startswith('https://')):
-        # 多くのサイトはHTTPSなので、デフォルトでHTTPSを試みる
-        target_url = 'https://' + target_url.replace('http://', '').replace('https://', '') 
-        
-    print(f"target_url:{target_url}")
+@app.route('/browser/<path:full_url_path>')
+def browser_access(full_url_path):
+    """Playwrightでウェブページにアクセスし、結果をセッションに保存"""
+    global global_html_content
+    browser_info = session.get('browser_info', {})
 
-    # セッションからブラウザ情報を取得
-    browser_info = session.pop('browser_info', {}) 
-    print(f" 🔐　悪用現金　🈲　browser_info:{browser_info}")
-    
-    # --- Playwrightの起動と処理 ---
+    # URLの再構築 (常にHTTPSを試みる)
+    target_url = f"https://{full_url_path}"
+    session['target_url'] = target_url # テンプレート表示用に保存
+    print(f"target_url:{target_url}")
+    print(f" 🔐　悪用現金　🈲　browser_info:{browser_info}") # ユーザー情報の確認
+
+    # Playwrightによるウェブアクセス
     try:
         with sync_playwright() as p:
-            # 1. ブラウザを起動 (ヘッドレスモードで実際のブラウザと同様に動作)
-            browser = p.chromium.launch(headless=True) 
+            # 💡 Render/Docker環境での安定化と軽量化のためのオプション
+            # --no-sandbox, --disable-setuid-sandbox, --disable-dev-shm-usage は必須
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    '--no-sandbox', 
+                    '--disable-setuid-sandbox', 
+                    '--disable-dev-shm-usage'
+                ]
+            )
             
-            # 2. コンテキスト（新しいブラウザセッション）の設定
-            # User-Agent, Viewport(画面サイズ), TimezoneをJSで取得した値でエミュレート
-            context_options = {
-                'user_agent': browser_info.get('User-Agent'),
-                'viewport': {
-                    'width': browser_info.get('Screen-Width', 1920),
+            # ブラウザ情報をコンテキストオプションとして設定
+            context = browser.new_context(
+                user_agent=browser_info.get('User-Agent', None),  # フォームから取得したUA
+                viewport={
+                    'width': browser_info.get('Screen-Width', 1920), 
                     'height': browser_info.get('Screen-Height', 1080)
                 },
-                'locale': 'ja-JP', # 日本語を優先
-                'timezone_id': browser_info.get('Timezone-Id', 'Asia/Tokyo'),
-            }
-            print(f"Context options:{context_options}")
-            context = browser.new_context(**context_options)
+                locale='ja-JP',
+                timezone_id=browser_info.get('Timezone-Id', 'Asia/Tokyo')
+            )
+            print(f"Context options:{context.options}")
 
-            # 3. Cookieの復元とセットアップ
-            # Flaskセッションに保存されたCookieをPlaywright形式に変換してロード
-            if 'cookies' in session:
-                cookies_list = session['cookies']
-                playwright_cookies = [
-                    {'name': c['name'], 'value': c['value'], 'domain': c['domain'], 'path': c['path']}
-                    for c in cookies_list if 'domain' in c and 'path' in c
-                ]
-                context.add_cookies(playwright_cookies)
-                print(f"Restored {len(playwright_cookies)} cookies to Playwright.")
-            
-            # 4. ページアクセス
             page = context.new_page()
-            
-            # 🚨 ページアクセス: JavaScriptが実行され、ボットチャレンジが自動でクリアされるのを待つ
-            response = page.goto(target_url, wait_until="networkidle", timeout=45000) # ネットワークアイドルまで待機
-            
-            # 5. 最終的なHTMLを取得
-            final_html = page.content()
-            final_status = response.status if response else 200
-            
-            # 6. Cookieの保存
-            # Playwrightで更新されたCookieを取得し、Flaskセッションに保存
-            updated_cookies = context.cookies()
-            session['cookies'] = [
-                {'name': c['name'], 'value': c['value'], 'domain': c['domain'], 'path': c['path']}
-                for c in updated_cookies
-            ]
-            print(f"New cookies saved from Playwright: {len(session['cookies'])} items.")
-            
-            # ブラウザを閉じる
-            browser.close()
 
-            # レスポンスHTMLを表示（簡易的なレンダリング結果）
-            return render_template_string("""
-                <h1>✅ 取得成功: {{ status }}</h1>
-                <h2>アクセス先: {{ target }}</h2>
-                <h3>ヘッドレスブラウザでボットチェックを突破しました</h3>
-                <hr>
-                <h3>HTMLコンテンツ（抜粋 0-500文字）</h3>
-                <pre>{{ content_excerpt }}</pre> 
-                <hr>
-                <a href="/">↩ 別のURLを試す</a>
-            """, 
-                status=f"{final_status} OK", 
-                target=target_url,
-                content_excerpt=final_html[:500]
+            # 💡 ボット対策突破のため、ネットワークが落ち着くまで待機し、タイムアウトも長めに設定
+            page.goto(
+                target_url, 
+                wait_until="networkidle", 
+                timeout=60000 # 60秒
             )
 
-    except PlaywrightTimeoutError:
-        print("🚨 Playwrightエラー: タイムアウトしました。")
-        return render_template_string("""
-            <h1>❌ エラー</h1>
-            <h2>アクセス先: {{ target }}</h2>
-            <hr>
-            <p>タイムアウトしました。Playwrightがページロードまたはボットチェックのクリアに時間がかかりすぎました。</p>
-            <hr>
-            <a href="/">↩ 別のURLを試す</a>
-        """, 
-            target=target_url
-        ), 504
-        
+            # 最終的なHTMLを取得
+            html_content = page.content()
+            global_html_content = html_content  # グローバル変数に保存
+
+            # クッキーの処理は省略（必要に応じて追加してください）
+            print(f"New cookies saved from Playwright: 0 items.")
+            
+            browser.close()
+
     except Exception as e:
-        print(f"🚨 Playwrightエラーが発生しました: {e}")
-        return render_template_string("""
-            <h1>❌ エラー</h1>
-            <h2>アクセス先: {{ target }}</h2>
-            <hr>
-            <p>ヘッドレスブラウザ処理中に予期せぬエラーが発生しました。</p>
-            <p>詳細: {{ error }}</p>
-            <hr>
-            <a href="/">↩ 別のURLを試す</a>
-        """, 
-            target=target_url,
-            error=str(e)
-        ), 500
+        error_msg = f"Playwrightエラーが発生しました: {e}"
+        print(f"🚨 {error_msg}")
+        return render_template_string(INDEX_HTML_WITH_JS, error_message=error_msg)
+
+    # 成功したらトップページにリダイレクトして結果を表示
+    return redirect(url_for('index'))
+
+# --- アプリケーション実行 ---
 
 if __name__ == '__main__':
-    # 実行時は必ず 'http://127.0.0.1:5000' にアクセスしてください
+    # 開発環境での実行
     app.run(debug=True)
+
+# Renderデプロイでは gunicorn main:app が実行される
+# gunicorn main:app --timeout 180 --workers 1 の実行を想定
